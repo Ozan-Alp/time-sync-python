@@ -5,16 +5,16 @@ import time
 import queue
 import threading
 import select
-
+import subprocess
 taskQueue = queue.Queue()
 stopFlag = False
+command_run=False# terminal komutlarini uygulama
+serverIp = "192.168.2.2"  # Replace with the server's IP address inspectrone icin server 192.168.2.2
+serverPort = 9999  # Replace with the server's port number
 
-def system_to_ntp_time(timestamp):#timestamp time.time olcak
+def system_to_ntp_time(timestamp):#timestamp=time.time 
 
-        return timestamp #+ NTP.NTP_DELTA# DELTAPC saatini 1900den hesapliyor, timestapmin usutne ekliyor
-    #timestampta zaten bu data var bu kisimda iki kere gun hesaplanmis oldu. SEBEBI: altta adam kodu recv = recv = time.time() diye yanlis yazdi diye degistirmistim
-    #megerse sadece = yanlismis  recv= recv - time.time() yapmak istemis. Orada burdaki 2 kere hesabi geri siliyor. Ben orayi degistigim icin Clienttan duzeltiyodum
-    #Ama bizim client bozuk oldugu icin tehlikeli, buradan tamamen kapattim
+        return timestamp + NTP.NTP_DELTA# NTP_DELTA PC  1900den bugune kadarki gunlerin time degerini hesapliyor, timestampin ustune ekliyor.
 
 def _to_int(timestamp):
 
@@ -86,6 +86,7 @@ class NTPPacket:
 
 
     _PACKET_FORMAT = "!B B B b 11I"
+    
     """packet format to pack/unpack"""
 
     def __init__(self, version=2, mode=3, tx_timestamp=0):
@@ -255,24 +256,56 @@ class WorkThread(threading.Thread):
             except queue.Empty:
                 continue
 
-listenIp = "0.0.0.0"#tum ipler demek
-listenPort = 9999
-socket = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-socket.bind((listenIp,listenPort))
-print ("local socket: "), socket.getsockname();
-recvThread = RecvThread(socket)
-recvThread.start()
-workThread = WorkThread(socket)
-workThread.start()
 
-while True:
+
+# Create a client socket
+timeout = 3
+clientSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+clientSocket.settimeout(timeout)
+clientSocket.setblocking(0)
+target_date = datetime.datetime(2023, 1, 1)
+target_time = target_date.timestamp()
+
+# Send data to the server
+i=+1
+sendPacket = NTPPacket(version=3,mode=4)# ICININ ONEMI YOK SERVER NTPPacket turunden data istiyor, icindeki bizim kullanmayacagimiz bazi bilgileri gonderecegi packete
+#yaziyor, data alma ve verme timestamplari gibi degerler. saniyelik sabit shift edilmis hata olabilir ama server time.time() datasini packete yazip geri gonderiyor.
+
+
+for i in range(5):
     try:
-        time.sleep(0.5)
-    except KeyboardInterrupt:
-        print ("Exiting...")
-        stopFlag = True
-        recvThread.join()
-        workThread.join()
-        #socket.close()
-        print ("Exited")
-    break
+        clientSocket.sendto(sendPacket.to_data(), (serverIp, serverPort))
+        ready = select.select([clientSocket], [], [], timeout)#timeoutlu data cekme, socketi nonblocking yapip select modulunu kullandik
+        if ready[0]:
+        # Receive response from the server
+            data, serverAddress = clientSocket.recvfrom(1024)
+            recvPacket = NTPPacket()
+            recvPacket.from_data(data)
+            received_time = time.ctime(recvPacket.tx_timestamp)#String format Ex: Mon May 15 10:57:42 2023
+            if recvPacket.tx_timestamp>target_time:
+                # Format the datetime object into a string accepted by timedatectl
+                dt = datetime.datetime.strptime(received_time, "%a %b %d %H:%M:%S %Y")
+                formatted_time = dt.strftime("%a %Y-%m-%d %H:%M:%S")
+                print("Received response&passed sanity check:", formatted_time)
+                if command_run:
+                    subprocess.run(["timedatectl", "set-ntp", "false"])
+                    subprocess.run(["timedatectl", "set-time", formatted_time])
+                    subprocess.run(["timedatectl", "set-timezone", "Europe/Istanbul"])
+                    subprocess.run(["timedatectl", "set-ntp", "true"])
+                break
+            else:
+                print("Sanity check failed.")
+        else:
+            print("Timeout occurred. No response received.")
+
+            
+    except socket.error as e:
+        # Handle any socket-related errors
+        print("Socket error occurred:", e)
+    
+# Close the socket
+clientSocket.close()
+
+
+#SET TIME
+
